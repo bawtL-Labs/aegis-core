@@ -41,7 +41,7 @@ Repository = "https://github.com/bawtL-Labs/aegis-core"
 Issues = "https://github.com/bawtL-Labs/aegis-core/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/sam_core"]
+packages = [{ include = "sam_core", from = "src" }]
 
 [tool.black]
 line-length = 88

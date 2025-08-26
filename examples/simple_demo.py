@@ -11,6 +11,7 @@ sys.path.insert(0, 'src')
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, Any, List
 
 from sam_core import (
     LocalJSONLStore,
@@ -19,33 +20,54 @@ from sam_core import (
     DecisionTrace,
     DecodingMode,
     generate_trace_id,
-    utcnow
+    utcnow,
+    PolicyAction
 )
 
 from sam_core.contracts.pmx import PMXInterface, AffectSnapshot, Traits
 from sam_core.contracts.scaffolding import ScaffoldingInterface, IdentitySnapshot
-from sam_core.contracts.sde import SDEInterface, DecisionRequest, DecisionResult
+from sam_core.contracts.sde import SDEInterface, DecisionRequestView, DecisionOutcomeView
+
+
+class MockTraits:
+    """Mock traits implementation."""
+    
+    def __init__(self):
+        self.creative = 0.7
+        self.analytical = 0.8
+        self.empathic = 0.9
+        self.curiosity = 0.6
+        self.balance = 0.5
+
+
+class MockAffectSnapshot:
+    """Mock affect snapshot implementation."""
+    
+    def __init__(self):
+        self.joy = 0.6
+        self.fear = 0.1
+        self.sadness = 0.0
+        self.anger = 0.0
+        self.surprise = 0.2
+        self.disgust = 0.0
+    
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "joy": self.joy,
+            "fear": self.fear,
+            "sadness": self.sadness,
+            "anger": self.anger,
+            "surprise": self.surprise,
+            "disgust": self.disgust
+        }
 
 
 class MockPMX(PMXInterface):
     """Mock PMX implementation for demonstration."""
     
     def __init__(self):
-        self.traits = Traits(
-            openness=0.7,
-            conscientiousness=0.8,
-            extraversion=0.4,
-            agreeableness=0.9,
-            neuroticism=0.2
-        )
-        self.affect = AffectSnapshot(
-            joy=0.6,
-            fear=0.1,
-            sadness=0.0,
-            anger=0.0,
-            surprise=0.2,
-            disgust=0.0
-        )
+        self.traits = MockTraits()
+        self.affect = MockAffectSnapshot()
     
     def get_traits(self) -> Traits:
         return self.traits
@@ -119,7 +141,7 @@ class MockSDE(SDEInterface):
     def __init__(self):
         self.decision_history = []
     
-    def make_decision(self, request: DecisionRequest) -> DecisionResult:
+    def make_decision(self, request: DecisionRequestView) -> DecisionOutcomeView:
         if "safety" in request.goal.lower():
             selected_option = "prioritize_safety"
             confidence = 0.9
@@ -130,7 +152,7 @@ class MockSDE(SDEInterface):
             selected_option = "balanced_approach"
             confidence = 0.7
         
-        result = DecisionResult(
+        result = DecisionOutcomeView(
             request_id=request.request_id,
             selected_option=selected_option,
             reasoning=f"Selected {selected_option} based on goal analysis",
@@ -141,13 +163,13 @@ class MockSDE(SDEInterface):
         self.decision_history.append(result)
         return result
     
-    def get_decision_options(self, request: DecisionRequest):
+    def get_decision_options(self, request: DecisionRequestView):
         return []
     
     def evaluate_option(self, option_id: str, context: dict) -> dict:
         return {"utility": 0.5, "risks": [], "requirements": []}
     
-    def get_decision_history(self, limit: int = 100):
+    def get_decision_history(self, limit: int = 100) -> List[DecisionOutcomeView]:
         return self.decision_history[-limit:]
     
     def update_decision_model(self, feedback: dict) -> None:
@@ -160,7 +182,7 @@ class SimpleAegisCore:
     def __init__(self, state_path: str = ".sam_state"):
         # Initialize core components
         self.state_store = LocalJSONLStore(state_path)
-        self.trace_logger = TraceLogger(self.state_store, "traces")
+        self.trace_logger = TraceLogger(self.state_store, "traces/decisions")
         self.policy = SelfGovernancePolicy()
         
         # Initialize external components
@@ -186,7 +208,7 @@ class SimpleAegisCore:
         identity = self.scaffolding.get_identity_snapshot()
         
         # Create decision request
-        request = DecisionRequest(
+        request = DecisionRequestView(
             request_id=trace_id,
             goal=goal,
             context=context,
@@ -201,20 +223,12 @@ class SimpleAegisCore:
             started_at=started_at,
             goal=goal,
             context=context,
-            constraints=identity.constraints,
+            constraints={"constraints": identity.constraints},
             compute_budget=request.compute_budget,
             time_budget_ms=request.time_budget_ms,
             maturity_level=self.maturity_level,
             mental_health=self.mental_health,
-            pmx_affect={
-                "anger": pmx_affect_snapshot.anger,
-                "fear": pmx_affect_snapshot.fear,
-                "sadness": pmx_affect_snapshot.sadness,
-                "joy": pmx_affect_snapshot.joy,
-                "surprise": pmx_affect_snapshot.surprise,
-                "disgust": pmx_affect_snapshot.disgust,
-                **pmx_affect_snapshot.custom_affects
-            },
+            pmx_affect=pmx_affect_snapshot.as_dict(),
             decoding_mode=DecodingMode.REASONING,
             confidence=0.8
         )
@@ -224,10 +238,10 @@ class SimpleAegisCore:
         
         # Update trace with policy results
         trace.policy_flags = policy_decision.flags
-        trace.interventions = policy_decision.interventions
+        trace.interventions = policy_decision.conditions
         
         # Make decision if allowed
-        if policy_decision.action.value == "allow":
+        if policy_decision.action == PolicyAction.ALLOW:
             # Get decision from SDE
             sde_result = self.sde.make_decision(request)
             
@@ -259,7 +273,7 @@ class SimpleAegisCore:
             trace.finished_at = utcnow()
             result = {
                 "status": "denied",
-                "reason": policy_decision.message,
+                "reason": f"Policy {policy_decision.action.value}",
                 "policy_action": policy_decision.action.value,
                 "conditions": policy_decision.conditions
             }
@@ -274,7 +288,7 @@ class SimpleAegisCore:
         return {
             "maturity_level": self.maturity_level,
             "mental_health": self.mental_health,
-            "pmx_affect": self.pmx.get_affect_snapshot().model_dump(),
+            "pmx_affect": self.pmx.get_affect_snapshot().as_dict(),
             "identity": self.scaffolding.get_identity_snapshot().model_dump(),
             "decision_count": len(self.sde.decision_history)
         }
@@ -328,7 +342,7 @@ def main():
     print(json.dumps(status, indent=2))
     
     # Check for trace files
-    trace_file = Path(".sam_state/traces.jsonl")
+    trace_file = Path(".sam_state/traces/decisions.jsonl")
     if trace_file.exists():
         print(f"\n📝 Trace file created: {trace_file}")
         with open(trace_file, 'r') as f:
